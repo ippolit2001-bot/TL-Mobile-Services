@@ -85,3 +85,62 @@ test('неполные и некорректные даты и время не �
   assert.ok(validate({ ...ready(), start: '25:00' }).start);
   assert.ok(validate({ ...ready(), account: '' }).account);
 });
+
+test('даты до заезда и после выезда не допускаются', () => {
+  assert.ok(validate({ ...ready(), date: '2026-03-25' }).date);
+  assert.ok(validate({ ...ready(), date: '2026-03-29' }).date);
+});
+
+test('дата выезда доступна после времени выезда 12:00', () => {
+  const d = { ...ready(), date: '2026-03-28', start: '17:00' };
+  assert.deepEqual(validate(d), {});
+  assert.equal(endTime(d), '17:45');
+});
+
+test('занятые дата и время не дают создать услугу', () => {
+  assert.ok(validate({ ...ready(), date: '2026-03-27' }).date);
+  assert.ok(validate({ ...ready(), start: '12:00' }).start);
+  assert.deepEqual(availability({ ...ready(), start: '12:00' }).staff, []);
+});
+
+test('единственный свободный инвентарь выбирается автоматически', () => {
+  const d = updateDraft(ready('bikes'), 'start', '10:00');
+  assert.deepEqual(d.inventory, ['Велосипед №1']);
+  assert.deepEqual(availability(d).inventory, ['Велосипед №1']);
+});
+
+test('занятый ресурс нельзя выбрать даже при наличии других свободных', () => {
+  const d = { ...ready(), start: '10:00', staff: 'Архипов М.А.', place: 'Парная №1' };
+  assert.ok(validate(d).staff);
+  assert.ok(validate(d).place);
+  assert.deepEqual(availability(d).staff, ['Петров В.И.']);
+});
+
+test('продление проверяет весь интервал и заменяет ставшие занятыми ресурсы', () => {
+  const d = { ...ready('steam-extended'), staff: 'Архипов М.А.', place: 'Парная №1' };
+  assert.deepEqual(validate(d), {});
+  const extended = updateDraft(d, 'extension', 15);
+  assert.equal(extended.staff, 'Петров В.И.');
+  assert.equal(extended.place, 'Парная №2');
+  assert.ok(validate({ ...d, extension: 15 }).staff);
+  assert.ok(validate({ ...d, extension: 15 }).place);
+});
+
+test('добавленная услуга занимает ресурсы, остальные свободные варианты остаются доступны', () => {
+  const occupied = [{ id: 'one', draft: ready() }];
+  assert.ok(validate(ready(), occupied).staff);
+  assert.ok(validate(ready(), occupied).place);
+  assert.deepEqual(availability(ready(), occupied).staff, ['Архипов М.А.']);
+  assert.deepEqual(validate({ ...ready(), staff: 'Архипов М.А.', place: 'Парная №1' }, occupied), {});
+});
+
+test('при занятости всех ресурсов слот полностью закрывается', () => {
+  const occupied = [{ draft: ready() }, { draft: { ...ready(), staff: 'Архипов М.А.', place: 'Парная №1' } }];
+  assert.deepEqual(availability(ready(), occupied).staff, []);
+  assert.ok(validate(ready(), occupied).start);
+});
+
+test('продление за часы работы услуги не допускается даже в дату выезда', () => {
+  const d = { ...ready('steam-extended'), date: '2026-03-28', start: '17:00', extension: 30 };
+  assert.ok(validate(d).start);
+});

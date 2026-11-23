@@ -1,6 +1,6 @@
 # Почасовые услуги · TL Mobile
 
-Кликабельный прототип по [мобильным макетам в Figma](https://www.figma.com/design/iC8R8NAxEZILEpw0ZjUyUp/?node-id=500-55624). Работает локально и на GitHub Pages, без сервера приложения и внешних зависимостей.
+Кликабельный прототип по [мобильным макетам в Figma](https://www.figma.com/design/HJqHBF2aSgjUoYtrysofG4/TL-MOBILE?node-id=46534-59576&t=fyTECscAJWKEC4bi-4). Работает локально и на GitHub Pages, без сервера приложения и внешних зависимостей.
 
 ## Публикация на GitHub Pages
 

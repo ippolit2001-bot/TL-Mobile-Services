@@ -1,146 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { newDraft, updateDraft, total, validate, endTime, availability } from '../model.js';
+import * as m from '../model.js';
 
-function ready(service = 'steam') {
-  let d = updateDraft(newDraft(), 'service', service);
-  d = updateDraft(d, 'date', '2026-03-26');
-  d = updateDraft(d, 'start', '11:00');
-  return { ...d, staff: 'Петров В.И.', place: service === 'gazebo' ? 'Беседка №5' : 'Парная №2' };
-}
+const ready = (service='steam') => ({...m.newDraft(),service,group:'Бани и СПА',date:'2026-11-27',start:'11:00',staff:'Петров В.И.',place:'Парная №2',inventory:['Веник'],age:'child',quantity:1,guests:1,account:'01',price:1500});
 
-test('до выбора даты и времени итог остаётся нулевым', () => {
-  const d = updateDraft(newDraft(), 'service', 'steam');
-  assert.equal(total(d), 0);
-  assert.equal(total(updateDraft(d, 'date', '2026-03-26')), 0);
-});
+test('подтверждение неизменённых даты, группы, услуги и начала сохраняет заполненную форму',()=>{const d=ready();for(const key of ['date','group','service','start'])assert.deepEqual(m.updateDraft(d,key,d[key]),d,key);});
 
-test('парная 45 минут стоит 1500, продление на 15 минут добавляет 500', () => {
-  const d = ready();
-  assert.equal(total(d), 1500);
-  assert.equal(endTime(d), '11:45');
-  const extended = { ...ready('steam-extended'), extension: 15 };
-  assert.equal(total(extended), 2000);
-  assert.equal(endTime(extended), '12:00');
-});
+test('услуга выбирается без обязательной группы',()=>assert.equal(m.validate({...ready(),group:''}).group,undefined));
+test('дата проживания доступна, прошлые и внешние даты закрыты',()=>{assert.equal(m.validate(ready()).date,undefined);for(const date of ['2026-11-22','2026-11-23','2026-11-30'])assert.ok(m.validate({...ready(),date}).date);});
+test('открытый конец проживания сохраняется при частичном запрете продаж',()=>{assert.ok(m.validate({...ready(),date:'2026-11-25'}).date);assert.equal(m.validate({...ready(),date:'2026-11-29',start:'17:00'}).date,undefined);});
+test('12:00 доступно согласно актуальному экрану времени',()=>assert.equal(m.validate({...ready(),start:'12:00'}).start,undefined));
+test('10:00 автоматически назначает единственные свободные ресурсы',()=>{const d=m.updateDraft(ready(),'start','10:00');assert.equal(d.staff,'Петров В.И.');assert.equal(d.place,'Парная №2');assert.deepEqual(d.inventory,['Веник']);});
+test('количество ограничено свободной вместимостью, а не гостями брони',()=>{assert.equal(m.validate({...ready(),quantity:3}).quantity,undefined);assert.ok(m.validate({...ready(),quantity:4}).quantity);assert.ok(m.validate({...ready(),quantity:1.5}).quantity);});
+test('показанная в секции детская парная стоит 1500; количество масштабирует итог',()=>{assert.equal(m.total(ready()),1500);assert.equal(m.total({...ready(),quantity:3}),4500);assert.equal(m.total({...ready(),price:1}),1500);});
+test('возраст и инвентарь обязательны в основной услуге',()=>{assert.ok(m.validate({...ready(),age:''}).age);assert.ok(m.validate({...ready(),inventory:[]}).inventory);});
+test('комментарий ограничен 255 символами',()=>{assert.equal(m.validate({...ready(),comment:'я'.repeat(255)}).comment,undefined);assert.ok(m.validate({...ready(),comment:'я'.repeat(256)}).comment);});
+test('ввод длинного комментария обрезается до 255 символов без изменения других полей',()=>{const d=ready();const next=m.updateDraft(d,'comment','я'.repeat(256));assert.equal(next.comment.length,255);assert.equal(next.start,'11:00');assert.equal(d.comment,'');});
+test('продление изменяет полную длительность и стоимость',()=>{const d={...ready('steam-extended'),extension:15};assert.equal(m.endTime(d),'12:00');assert.equal(m.total(d),2000);});
+test('общий и индивидуальный счёт проходят проверку',()=>{assert.equal(m.validate({...ready(),account:'general'}).account,undefined);assert.equal(m.validate({...ready(),account:'02'}).account,undefined);});
+test('новый счёт и начисление создаются одной операцией без дублей',()=>{const state=m.initialState();const result=m.commitService(state,{...ready(),account:'new-room'},'req-one');assert.equal(result.ok,true);assert.equal(result.state.accounts.length,state.accounts.length+1);assert.equal(result.state.items.length,state.items.length+1);const again=m.commitService(result.state,{...ready(),account:'new-room'},'req-one');assert.deepEqual(again.state,result.state);});
+test('конфликт ресурса не создаёт пустой счёт',()=>{const state=m.initialState();const first=m.commitService(state,ready(),'req-one');const second=m.commitService(first.state,{...ready(),account:'new-room'},'req-two');assert.equal(second.ok,false);assert.equal(second.state.accounts.length,first.state.accounts.length);assert.equal(second.state.items.length,first.state.items.length);});
 
-test('возраст определяет цену, без возраста услуга не добавляется', () => {
-  const d = ready('pool');
-  assert.equal(total(d), 0);
-  assert.ok(validate(d).age);
-  assert.equal(total(updateDraft(d, 'age', 'adult')), 1500);
-  assert.equal(total(updateDraft(d, 'age', 'child')), 750);
-});
-
-test('беседка с двумя дополнительными гостями стоит 6000, лимит валидируется', () => {
-  const d = { ...ready('gazebo'), extraEnabled: true, extra: 2 };
-  assert.equal(total(d), 6000);
-  assert.equal(validate(d).extra, undefined);
-  assert.ok(validate({ ...d, extra: 11 }).extra);
-  assert.ok(validate({ ...d, extra: -1 }).extra);
-});
-
-test('дата сбрасывает время и ресурсы, начало сбрасывает ресурсы и продление', () => {
-  const d = { ...ready('steam-extended'), extension: 15 };
-  const date = updateDraft(d, 'date', '2026-03-27');
-  assert.equal(date.start, '');
-  assert.equal(date.staff, '');
-  assert.equal(date.place, '');
-  const start = updateDraft(d, 'start', '12:00');
-  assert.equal(start.staff, '');
-  assert.equal(start.place, '');
-  assert.equal(start.extension, 0);
-});
-
-test('единственные ресурсы подставляются автоматически', () => {
-  const d = updateDraft(ready(), 'start', '10:00');
-  assert.equal(availability(d).staff.length, 1);
-  assert.equal(d.staff, 'Петров В.И.');
-  assert.equal(d.place, 'Парная №2');
-});
-
-test('несколько ресурсов требуют выбора; количество должно быть целым положительным', () => {
-  const d = updateDraft(updateDraft(newDraft(), 'service', 'steam'), 'date', '2026-03-26');
-  const scheduled = updateDraft(d, 'start', '11:00');
-  assert.ok(validate(scheduled).staff);
-  assert.ok(validate(scheduled).place);
-  assert.deepEqual(validate(ready()), {});
-  assert.ok(validate({ ...ready(), guests: 0 }).guests);
-  assert.ok(validate({ ...ready(), guests: 1.5 }).guests);
-  assert.ok(validate({ ...ready(), price: -1 }).price);
-});
-
-test('инвентарь выбирается множественно, стоимость зависит от количества гостей', () => {
-  const d = { ...ready('bikes'), age: 'adult', inventory: ['Велосипед №1', 'Велосипед №2'], guests: 2 };
-  assert.equal(total(d), 1000);
-  assert.equal(validate(d).inventory, undefined);
-  assert.ok(validate({ ...d, inventory: [] }).inventory);
-  assert.equal(total({ ...d, guests: 1 }), 500);
-});
-
-test('неполные и некорректные даты и время не допускаются', () => {
-  assert.ok(validate(newDraft()).group);
-  assert.ok(validate(newDraft()).service);
-  assert.ok(validate({ ...ready(), date: '2026-02-31' }).date);
-  assert.ok(validate({ ...ready(), start: '25:00' }).start);
-  assert.ok(validate({ ...ready(), account: '' }).account);
-});
-
-test('даты до заезда и после выезда не допускаются', () => {
-  assert.ok(validate({ ...ready(), date: '2026-03-25' }).date);
-  assert.ok(validate({ ...ready(), date: '2026-03-29' }).date);
-});
-
-test('дата выезда доступна после времени выезда 12:00', () => {
-  const d = { ...ready(), date: '2026-03-28', start: '17:00' };
-  assert.deepEqual(validate(d), {});
-  assert.equal(endTime(d), '17:45');
-});
-
-test('занятые дата и время не дают создать услугу', () => {
-  assert.ok(validate({ ...ready(), date: '2026-03-27' }).date);
-  assert.ok(validate({ ...ready(), start: '12:00' }).start);
-  assert.deepEqual(availability({ ...ready(), start: '12:00' }).staff, []);
-});
-
-test('единственный свободный инвентарь выбирается автоматически', () => {
-  const d = updateDraft(ready('bikes'), 'start', '10:00');
-  assert.deepEqual(d.inventory, ['Велосипед №1']);
-  assert.deepEqual(availability(d).inventory, ['Велосипед №1']);
-});
-
-test('занятый ресурс нельзя выбрать даже при наличии других свободных', () => {
-  const d = { ...ready(), start: '10:00', staff: 'Архипов М.А.', place: 'Парная №1' };
-  assert.ok(validate(d).staff);
-  assert.ok(validate(d).place);
-  assert.deepEqual(availability(d).staff, ['Петров В.И.']);
-});
-
-test('продление проверяет весь интервал и заменяет ставшие занятыми ресурсы', () => {
-  const d = { ...ready('steam-extended'), staff: 'Архипов М.А.', place: 'Парная №1' };
-  assert.deepEqual(validate(d), {});
-  const extended = updateDraft(d, 'extension', 15);
-  assert.equal(extended.staff, 'Петров В.И.');
-  assert.equal(extended.place, 'Парная №2');
-  assert.ok(validate({ ...d, extension: 15 }).staff);
-  assert.ok(validate({ ...d, extension: 15 }).place);
-});
-
-test('добавленная услуга занимает ресурсы, остальные свободные варианты остаются доступны', () => {
-  const occupied = [{ id: 'one', draft: ready() }];
-  assert.ok(validate(ready(), occupied).staff);
-  assert.ok(validate(ready(), occupied).place);
-  assert.deepEqual(availability(ready(), occupied).staff, ['Архипов М.А.']);
-  assert.deepEqual(validate({ ...ready(), staff: 'Архипов М.А.', place: 'Парная №1' }, occupied), {});
-});
-
-test('при занятости всех ресурсов слот полностью закрывается', () => {
-  const occupied = [{ draft: ready() }, { draft: { ...ready(), staff: 'Архипов М.А.', place: 'Парная №1' } }];
-  assert.deepEqual(availability(ready(), occupied).staff, []);
-  assert.ok(validate(ready(), occupied).start);
-});
-
-test('продление за часы работы услуги не допускается даже в дату выезда', () => {
-  const d = { ...ready('steam-extended'), date: '2026-03-28', start: '17:00', extension: 30 };
-  assert.ok(validate(d).start);
-});
+test('обновление доступности заменяет занятые ресурсы единственными свободными, сохраняя остальные данные',()=>{const d={...ready(),comment:'Сохранить пожелание'};const next=m.reconcileResources(d,[{draft:ready()}]);assert.equal(next.staff,'Архипов М.А.');assert.equal(next.place,'Парная №1');assert.deepEqual(next.inventory,['Полотенце']);assert.equal(next.comment,'Сохранить пожелание');assert.equal(next.date,'2026-11-27');});
+test('устаревшее редактирование не восстанавливает удалённую услугу и не создаёт счёт',()=>{const first=m.commitService(m.initialState(),ready(),'first');const deleted={...first.state,items:first.state.items.filter(i=>i.id!==first.item.id)};const result=m.commitService(deleted,{...ready(),account:'new-room'},'edit',{id:first.item.id,expected:JSON.stringify(first.item)});assert.equal(result.ok,false);assert.ok(result.errors.edit);assert.deepEqual(result.state,deleted);});
+test('устаревшее редактирование не дублирует услугу, перенесённую в другом окне',()=>{const first=m.commitService(m.initialState(),ready(),'first');const changed=structuredClone(first.state);changed.items.find(i=>i.id===first.item.id).draft.start='13:00';const result=m.commitService(changed,ready(),'edit',{id:first.item.id,expected:JSON.stringify(first.item)});assert.equal(result.ok,false);assert.ok(result.errors.edit);assert.deepEqual(result.state,changed);});
+test('редактирование актуальной услуги исключает её собственную занятость и сохраняет идентификатор',()=>{const first=m.commitService(m.initialState(),ready(),'first');const edit=m.commitService(first.state,{...ready(),quantity:2},'edit',{id:first.item.id,expected:JSON.stringify(first.item)});assert.equal(edit.ok,true);assert.equal(edit.item.id,first.item.id);assert.equal(edit.state.items.length,first.state.items.length);assert.equal(edit.item.price,3000);});

@@ -1,219 +1,142 @@
-import { SERVICES, STAY, STARTS, newDraft, updateDraft, total, validate, availability, endTime, isStayDate, isAvailableDate, isSlotAvailable, stayDates } from './model.js';
+import {STAY,GROUPS,STARTS,SERVICES,newDraft,initialState,defaultAccount,listServices,stayDates,dateReason,availability,isSlotAvailable,capacity,updateDraft,reconcileResources,basePrice,total,duration,endTime,validate,commitService} from './model.js';
 
-const $ = s => document.querySelector(s);
-const content = $('#app-content'), header = $('#app-header'), footer = $('#app-footer'), dialog = $('#picker');
-const money = n => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(n) + ' RUB';
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const dateText = v => v ? new Date(v + 'T12:00:00').toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }).replace(' г.', '') : '';
-const icons = {
-  back: '<path d="m20 12H4m7-7-7 7 7 7"/>', close: '<path d="m6 6 12 12M6 18 18 6"/>', chevron: '<path d="m8 10 4 4 4-4"/>', next: '<path d="m9 6 6 6-6 6"/>', calendar: '<rect x="4" y="5" width="16" height="16" rx="2"/><path d="M16 3v4M8 3v4M4 11h16"/>', clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>', plus: '<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>', check: '<path d="m5 12 4 4L19 6"/>', bed: '<path d="M3 18v-7h18v7M3 15h18M5 11V6h14v5M8 8h3M14 8h3"/>', service: '<path d="M3 17h18M5 17a7 7 0 0 1 14 0M12 6v3M10 6h4"/>', trash: '<path d="M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/>', edit: '<path d="m4 16-1 5 5-1L20 8l-4-4L4 16Z"/>', meal: '<path d="M5 3v6c0 3 5 3 5 0V3M7.5 3v18M19 3c-5 3-5 9 0 9v9M19 3v9"/>', car: '<path d="m4 11 2-6h12l2 6M3 11h18v7H3zM6 18v3M18 18v3M6 14h2M16 14h2"/>', left: '<path d="m15 6-6 6 6 6"/>', right: '<path d="m9 6 6 6-6 6"/>', info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v.2"/>', reset: '<path d="M4 8a8 8 0 1 1 0 8M4 3v5h5"/>',
-};
-const icon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.service}</svg>`;
-const primary = (label, action, disabled = false) => `<button class="primary" data-action="${action}" ${disabled ? 'disabled' : ''}>${esc(label)}</button>`;
-const secondary = (label, action) => `<button class="secondary" data-action="${action}">${esc(label)}</button>`;
-const initial = () => [{ id: 'breakfast', title: 'Завтрак (Взрослый)', price: 3000, description: '2 шт · за гостя в сутки', icon: 'meal' }, { id: 'parking', title: 'Парковка', price: 500, description: '1 шт · за использование', icon: 'car' }];
-const storageKey = 'tl-hourly-prototype-v1';
-let saved = initial(), restoredWarning = false;
-try {
-  const data = JSON.parse(localStorage.getItem(storageKey));
-  if (Array.isArray(data)) {
-    const accepted = [];
-    for (const item of data) {
-      if (item && typeof item.title === 'string' && Number.isFinite(item.price) && (!item.draft || !Object.keys(validate(item.draft, accepted)).length)) accepted.push(item);
-      else restoredWarning = true;
-    }
-    saved = accepted;
-  }
-} catch { /* Browser storage is optional. */ }
-let items = structuredClone(saved), view = 'list', draft = newDraft(), errors = {}, editingId = null, detailId = null, savedBanner = false, scenario = 'steam';
-let modal = null, toastTimer;
-const scenarios = [
-  ['steam', 'Основной сценарий', '26 марта: 10:00 — один ресурс, 11:00 — несколько, 12:00 — занято. 27 марта свободных слотов нет. В день выезда 28 марта можно выбрать время после 12:00, в том числе 17:00.'],
-  ['steam-extended', 'С продлением', '45 минут — 1 500 RUB. При выборе окончания до 12:00 доплата составит 500 RUB.'],
-  ['pool', 'Возрастные тарифы', 'Выбор возраста определяет цену: взрослый — 1 500 RUB, ребёнок 2–10 лет — 750 RUB.'],
-  ['bikes', 'Инвентарь', 'Можно выбрать несколько велосипедов. Цена — 500 RUB за одного гостя; количество гостей задаётся отдельно.'],
-  ['gazebo', 'Дополнительные гости', 'Беседка включает 4 гостей за 5 000 RUB. Каждый дополнительный гость — ещё 500 RUB.'],
-];
-function reservations() { return items.filter(item => item.id !== editingId); }
-function dirty() { return JSON.stringify(items) !== JSON.stringify(saved); }
-function bookingTotal() { return items.reduce((sum, s) => sum + s.price, 0); }
-function notify(message) { clearTimeout(toastTimer); $('#toast').textContent = message; $('#toast').classList.add('visible'); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 3200); }
-function renderScenarios() {
-  $('#scenarios').innerHTML = scenarios.map(([id, title]) => `<button class="scenario ${id === scenario ? 'active' : ''}" data-scenario="${id}" aria-pressed="${id === scenario}">${title}</button>`).join('');
-  $('#case-note').textContent = scenarios.find(s => s[0] === scenario)?.[2] || '';
+const $=s=>document.querySelector(s),content=$('#app-content'),header=$('#app-header'),footer=$('#app-footer');
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+const money=n=>new Intl.NumberFormat('ru-RU',{maximumFractionDigits:2}).format(n)+' RUB';
+const dateText=d=>d?new Date(d+'T12:00:00').toLocaleDateString('ru-RU',{day:'numeric',month:'long',year:'numeric'}).replace(' г.',''):'';
+const storageKey='tl-mobile-section-48181-v2';
+function readState(){try{const s=JSON.parse(localStorage.getItem(storageKey));if(s?.schema===2&&s.data&&Array.isArray(s.data.items)&&Array.isArray(s.data.accounts)&&Array.isArray(s.data.requests)&&Array.isArray(s.data.external)&&s.data.accounts.every(a=>typeof a.id==='string'&&typeof a.label==='string')&&s.data.items.every(i=>typeof i.title==='string'&&Number.isFinite(i.price)&&(!i.draft||SERVICES[i.draft.service])))return s.data;}catch{}return initialState();}
+let state=readState(),page='list',draft=newDraft(),picker=null,editingId=null,editingSnapshot='',editConflict=false,detailId=null,formScroll=0,requestId='',busy=false,savedResult=false,conflictMessage='',simulateConflict=false,toastTimer;
+function reservations(){return [...state.items.filter(i=>i.id!==editingId),...state.external];}
+function saveState(){try{localStorage.setItem(storageKey,JSON.stringify({schema:2,data:state}));return true;}catch{$('#storage-status').textContent='Сохранение доступно только в текущем сеансе';return false;}}
+function notify(text){clearTimeout(toastTimer);$('#toast').textContent=text;$('#toast').classList.add('visible');toastTimer=setTimeout(()=>$('#toast').classList.remove('visible'),3000);}
+function setPage(next,scroll=0){page=next;render();content.scrollTop=scroll;}
+function appHeader(title){header.innerHTML=`<button class="back-button" data-action="back" aria-label="Назад" ${busy?'disabled':''}><img src="assets/back.svg" width="24" height="24" alt=""></button><h2>${esc(title)}</h2>`;}
+const primary=(label,action,disabled=false)=>`<button class="primary" data-action="${action}" ${disabled?'disabled':''}>${esc(label)}</button>`;
+function getErrors(){return {...validate(draft,reservations(),state.accounts),...(editConflict?{edit:'Услуга изменена в другом окне'}:{})};}
+function accountLabel(){return state.accounts.find(a=>a.id===draft.account)?.label||({'new-room':'Новый счёт номера','new-general':'Новый общий счёт брони'})[draft.account]||'Не выбран';}
+function field(key,label,value,{read=false,grey=false,help='',disabled=false,noArrow=false,empty='Не выбрано'}={}){
+ const cls=`field ${read?'plain':'clickable'} ${grey?'grey':''} ${!value&&value!==0?'empty':''}`;
+ const inner=`<span class="field-label">${esc(label)}</span><span class="field-value">${esc(value||empty)}</span>${!read&&!noArrow?'<img class="field-arrow" src="assets/caret.svg" width="24" height="24" alt="">':''}`;
+ return `<div class="field-wrap" data-field="${key}">${read?`<div class="${cls}" aria-label="${esc(label)}">${inner}</div>`:`<button type="button" class="${cls}" data-picker="${key}" aria-label="${esc(label)}" ${disabled?'disabled':''}>${inner}</button>`}${help?`<p class="helper">${esc(help)}</p>`:''}</div>`;
 }
-function appHeader(title, action = 'back') { header.innerHTML = `<button class="icon-button" aria-label="Назад" data-action="${action}">${icon('back')}</button><h2>${esc(title)}</h2>`; }
-function renderFooter() {
-  if (view === 'form') footer.innerHTML = `<div class="total-row"><span>Стоимость</span><strong id="draft-total">${money(total(draft, reservations()))}</strong></div>${primary(editingId ? 'Сохранить изменения' : 'Добавить услугу', 'submit', !!draft.start && !isSlotAvailable(draft, reservations()))}`;
-  else if (view === 'list') footer.innerHTML = `${dirty() ? '<p class="dirty-note">Примените изменения к бронированию</p>' : ''}<div class="total-row"><span>Сумма за услуги</span><strong>${money(bookingTotal())}</strong></div>${primary('Применить', 'apply')}`;
-  else if (view === 'detail') { const item = items.find(i => i.id === detailId); footer.innerHTML = `<div class="total-row"><span>Стоимость</span><strong>${money(item?.price || 0)}</strong></div>${primary('Готово', 'list')}`; }
-  else footer.innerHTML = primary('Услуги в номере', 'list');
+const title=t=>`<h3 class="section-title">${esc(t)}</h3>`;
+function renderForm(){
+ appHeader(editingId?'Изменение услуги':'Добавление услуги');
+ const s=SERVICES[draft.service],a=availability(draft,reservations()),scheduled=Boolean(draft.start),slot=isSlotAvailable(draft,reservations());
+ let html=field('group','Группа услуг',draft.group==='uncategorized'?'Без категории':draft.group,{empty:'Не выбрано'})+field('service','Услуга',s?.title,{empty:'Не выбрана'});
+ if(s){
+  html+=title('Дата и время')+field('date','Дата оказания услуги',dateText(draft.date),{empty:'Не выбрана',help:'23–29 ноября включительно. В день выезда доступно время после 12:00.'});
+  html+=field('start','Начало',draft.start,{disabled:!draft.date,empty:'Не выбрано'});
+  const canExtend=s.extend&&scheduled&&[15,30].some(extension=>isSlotAvailable({...draft,extension},reservations()));
+  html+=field('extension','Окончание',endTime(draft)+(draft.extension?` (+${money(draft.extension/15*500)})`:''),{read:!canExtend,grey:!canExtend,empty:'—'});
+  html+=`<p class="helper">Длительность: ${duration(draft)} минут</p>`;
+  if(scheduled){
+   if(conflictMessage)html+=`<p class="conflict-note" role="alert">${esc(conflictMessage)}</p>`;
+   if(!slot&&!conflictMessage)html+='<p class="helper availability-error">На выбранный интервал нет свободных ресурсов. Выберите другое время.</p>';
+   if(s.staff||s.place||s.inventory)html+=title('Ресурсы');
+   if(s.staff)html+=field('staff','Сотрудник',draft.staff,{read:a.staff.length<=1,grey:a.staff.length<=1,empty:'Не выбран',help:a.staff.length===1?'Единственный свободный сотрудник выбран автоматически':''});
+   if(s.place)html+=field('place','Место',draft.place,{read:a.places.length<=1,grey:a.places.length<=1,empty:'Не выбрано',help:a.places.length===1?'Единственное свободное место выбрано автоматически':''});
+   if(s.inventory)html+=field('inventory','Инвентарь',draft.inventory.join(', '),{read:a.inventory.length<=1,grey:a.inventory.length<=1,empty:'Не выбран',help:a.inventory.length===1?'Единственный свободный инвентарь выбран автоматически':''});
+   if(s.age)html+=title('Возраст гостя')+field('age','Возраст',draft.age==='adult'?'Взрослый':draft.age==='child'?'Ребёнок (2–10 лет)':'',{empty:'Не выбран'});
+   html+=title('Количество и цена')+field('quantity','Количество',draft.quantity,{read:!!s.fixedQuantity||capacity(draft,reservations())<=1,grey:!!s.fixedQuantity,noArrow:true,help:s.includedGuests?'Включено 4 гостя':`Доступная вместимость: ${capacity(draft,reservations())}`});
+   html+=field('price','Цена (RUB)',new Intl.NumberFormat('ru-RU').format(basePrice(draft)),{read:true});
+   if(s.includedGuests)html+=field('extra','Дополнительные гости',String(draft.extra),{help:'До 2 дополнительных гостей · 500 RUB за гостя'});
+   html+=title('Детали начисления')+field('account','Счёт',accountLabel(),{help:'Иванов Иван Иванович'});
+   if(draft.account==='new-room'||draft.account==='new-general')html+=`<p class="helper">${draft.account==='new-room'?'Счёт текущего номера «101»':'Общий счёт брони без привязки к номеру'} будет создан при добавлении услуги.</p>`;
+   html+=`<div class="field-wrap"><label class="field plain" for="comment"><span class="field-label">Комментарий</span><textarea id="comment" name="comment" aria-label="Комментарий" maxlength="255" rows="2">${esc(draft.comment)}</textarea></label><p id="comment-count" class="helper">Необязательно · ${draft.comment.length} / 255 символов</p></div>`;
+  }else html+='<p class="helper">После выбора даты и времени появятся доступные ресурсы и параметры услуги.</p>';
+ }else html+='<p class="helper">Группа необязательна. Без группы доступны все почасовые услуги.</p>';
+ content.innerHTML=`<form class="form-body" id="service-form" novalidate>${html}</form>`;
+ const comment=$('#comment');if(comment)comment.style.height=Math.max(48,comment.scrollHeight)+'px';
 }
-function field(key, label, value, opts = {}) {
-  const error = errors[key], helpId = `help-${key}`, inputId = `field-${key}`;
-  const cls = `field ${opts.read ? 'readonly' : ''} ${!value && value !== 0 ? 'empty' : ''} ${opts.disabled ? 'disabled' : ''}`;
-  let inner = `<span class="field-label">${esc(label)}</span>`;
-  const aria = `aria-label="${esc(label)}" ${error ? 'aria-invalid="true"' : ''} ${error || opts.help ? `aria-describedby="${helpId}"` : ''}`;
-  if (opts.input) {
-    inner += opts.textarea ? `<textarea id="${inputId}" data-input="${key}" ${aria} maxlength="500" rows="2">${esc(value)}</textarea>` : `<input id="${inputId}" data-input="${key}" ${aria} type="number" inputmode="decimal" min="${opts.min ?? 0}" max="${opts.max ?? 1000000}" step="${key === 'price' ? '.01' : '1'}" value="${esc(value)}">`;
-  } else inner += `<span class="field-value">${esc(value || opts.empty || 'Не выбрано')}</span>${opts.read ? '' : `<span class="field-icon">${icon(opts.icon || 'chevron')}</span>`}`;
-  const control = opts.input ? `<label class="${cls}" for="${inputId}">${inner}</label>` : opts.read ? `<div class="${cls}" ${aria}>${inner}</div>` : `<button type="button" class="${cls}" data-picker="${key}" ${aria} ${opts.disabled ? 'disabled' : ''}>${inner}</button>`;
-  return `<div class="field-wrap ${error ? 'field-error' : ''}" data-field="${key}">${control}${error || opts.help ? `<p class="helper" id="${helpId}" ${error ? 'role="alert"' : ''}>${esc(error || opts.help)}</p>` : ''}</div>`;
+function bookingHead(){return `<div class="booking-head"><h3>Услуги в номере</h3><p class="booking-meta">Бронь № 4136985 · Иванов Иван Иванович<br>«101» Комфорт · 2 гостя<br>23–29 ноября 2026 · выезд в 12:00</p></div>`;}
+function renderList(){appHeader('Услуги в номере');content.innerHTML=bookingHead()+`<div class="service-list">${state.items.map(i=>`<button class="service-row" data-detail="${esc(i.id)}"><span class="service-main">${esc(i.title)}${i.draft?`<small>${dateText(i.draft.date)} · ${i.draft.start}–${endTime(i.draft)}<br>${esc(i.account)} · ${i.draft.quantity} шт.</small>`:''}</span><span class="service-price">${money(i.price)}</span></button>`).join('')}</div><button class="text-action list-add" data-action="add"><img src="assets/add.svg" width="18" height="18" alt="">Добавить услугу</button>`;}
+function renderType(){appHeader('Тип услуги');content.innerHTML=`<div class="picker-body"><h3 class="picker-heading">Выберите тип услуги</h3>${option({value:'general',label:'Общая услуга или услуга питания'},false)}${option({value:'hourly',label:'Почасовая'},false)}<p class="picker-help">Для услуг с фиксированной длительностью: баня, массаж, прокат.</p></div>`;}
+function option(o,selected,multiple=false){return `<button class="option ${selected?'selected':''} ${multiple?'multiple':''}" data-option="${esc(o.value)}" ${o.disabled?'disabled':''} aria-pressed="${selected}"><span class="option-main">${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</span>${o.side?`<span class="option-side">${esc(o.side)}</span>`:''}<span class="radio" aria-hidden="true"></span></button>`;}
+function pickerOptions(key){
+ const s=SERVICES[draft.service],a=availability(draft,reservations());let name='',help='',options=[],selected=draft[key],multiple=false;
+ if(key==='group'){name='Группа услуг';options=[{value:'',label:'Не выбрано',side:'Все услуги'},{value:'uncategorized',label:'Без категории',side:'Без группы'},...GROUPS.map(value=>({value,label:value,side:listServices(value).length+(listServices(value).length===1?' услуга':' услуги')}))];help='Выбор группы необязателен. Без выбора отображаются все почасовые услуги.';}
+ if(key==='service'){name=draft.group==='uncategorized'?'Без категории':draft.group||'Все почасовые услуги';options=listServices(draft.group).map(([value,s])=>({value,label:s.title,side:money(s.price)}));help=draft.group?'Показаны только услуги выбранной группы.':'Группа не выбрана: показаны услуги всех групп и без категории.';}
+ if(key==='start'){name='Начало оказания';options=STARTS.map(value=>{const d={...draft,start:value,extension:0},r=availability(d,reservations()),free=isSlotAvailable(d,reservations());return {value,label:value,disabled:!free,side:free?s.staff&&s.place?`${r.staff.length} ${r.staff.length===1?'сотрудник':'сотрудника'} · ${r.places.length} ${r.places.length===1?'место':'места'}`:s.inventory?`${r.inventory.length} ед. инвентаря`:'Свободно':'Занято'};});help=dateText(draft.date)+' · 10:00–18:00.';}
+ if(key==='extension'){name='Окончание и продление';selected=String(draft.extension);options=[0,15,30].map(n=>({value:String(n),label:endTime({...draft,extension:n}),side:n?'+'+money(n/15*500):'Без доплаты',disabled:!isSlotAvailable({...draft,extension:n},reservations())}));help='Доступность ресурсов проверяется на всю длительность услуги.';}
+ if(key==='staff'){name='Выбор сотрудника';options=a.staff.map(value=>({value,label:value}));}
+ if(key==='place'){name='Выбор места';options=a.places.map(value=>({value,label:value}));}
+ if(key==='inventory'){name='Инвентарь';multiple=draft.service==='bikes';selected=multiple?[...draft.inventory]:draft.inventory[0]||'';options=a.inventory.map(value=>({value,label:value}));help=multiple?'Выберите одну или несколько свободных единиц инвентаря.':'';}
+ if(key==='age'){name='Возраст гостя';options=[{value:'adult',label:'Взрослый'},{value:'child',label:'Ребёнок (2–10 лет)'}];}
+ if(key==='quantity'){name='Количество';selected=String(draft.quantity);options=Array.from({length:capacity(draft,reservations())},(_,i)=>({value:String(i+1),label:String(i+1)}));help='Количество не зависит от двух проживающих по брони и ограничено свободной вместимостью.';}
+ if(key==='extra'){name='Дополнительные гости';selected=String(draft.extra);options=Array.from({length:s.maxExtra+1},(_,i)=>({value:String(i),label:String(i),side:i?'+'+money(i*s.extraPrice):'Без доплаты'}));help='Включено 4 гостя. Общая вместимость — 6.';}
+ if(key==='account'){name='Выбор счёта';options=state.accounts.map(a=>({value:a.id,label:a.label}));options.push({value:'new-room',label:'Добавить в новый счёт',description:'Новый индивидуальный счёт текущего номера'});if(!state.accounts.some(a=>a.room===null))options.push({value:'new-general',label:'Новый общий счёт брони'});help=state.accounts.some(a=>a.room===null)?'Общий счёт уже существует. Действие «Новый общий счёт брони» не показывается.':'Новый счёт и начисление будут созданы вместе при добавлении услуги.';}
+ return {key,name,help,options,selected,multiple};
 }
-const title = s => `<h3 class="section-title">${s}</h3>`;
-function renderForm() {
-  appHeader(editingId ? 'Изменение услуги' : 'Добавление услуги', 'cancel-form');
-  const s = SERVICES[draft.service], a = availability(draft, reservations()), scheduled = Boolean(draft.start), freeSlot = isSlotAvailable(draft, reservations());
-  let html = field('group', 'Группа услуг', draft.group, { empty: 'Не выбрана' }) + field('service', 'Услуга', s?.title, { disabled: !draft.group, empty: 'Не выбрана' });
-  if (s) {
-    html += field('tempo', 'Темп начисления', 'За использование', { read: true }) + title('Дата и время');
-    html += field('date', 'Дата оказания услуги', dateText(draft.date), { icon: 'calendar', empty: 'Не выбрана', help: '26–28 марта включительно. В день выезда услуга доступна и после 12:00.' });
-    html += `<div class="input-row">${field('start', 'Начало', draft.start, { icon: 'clock', disabled: !draft.date })}${field('extension', 'Окончание', endTime(draft) || '—', { read: !s.extend || !scheduled })}</div>`;
-    html += `<p class="helper">${s.extend ? 'Базовая длительность' : 'Длительность'}: ${s.duration} ${s.duration === 60 ? 'минут' : 'минут'}${draft.extension ? ` · продление +${draft.extension} минут` : ''}</p>`;
-    if (scheduled && freeSlot) {
-      if (s.staff || s.place || s.inventory || s.age) html += title('Ресурсы и параметры');
-      if (s.age) html += field('age', 'Возраст', draft.age === 'adult' ? 'Взрослый' : draft.age === 'child' ? 'Ребёнок (2–10 лет)' : '', { empty: 'Не выбран' });
-      if (s.staff) html += field('staff', 'Сотрудник', draft.staff, { read: a.staff.length <= 1, empty: 'Не выбран', help: a.staff.length === 1 ? 'Единственный свободный сотрудник выбран автоматически' : `Свободных сотрудников: ${a.staff.length}` });
-      if (s.place) html += field('place', 'Место', draft.place, { read: a.places.length <= 1, help: a.places.length === 1 ? 'Единственное свободное место выбрано автоматически' : `Свободных мест: ${a.places.length}` });
-      if (s.inventory) html += field('inventory', 'Инвентарь', draft.inventory.join(', '), { read: a.inventory.length <= 1, empty: 'Не выбран', help: a.inventory.length === 1 ? 'Единственный свободный инвентарь выбран автоматически' : `Свободных единиц: ${a.inventory.length}. Можно выбрать несколько` });
-      html += title('Количество и цена');
-      html += field('guests', 'Кол-во гостей', draft.guests, { input: !s.baseGuests, read: !!s.baseGuests, min: 1, max: 100, help: s.baseGuests ? 'Базовое количество гостей' : '' });
-      html += field('price', 'Цена (RUB)', draft.price, { input: !s.age && !s.inventory && !s.baseGuests, read: !!(s.age || s.inventory || s.baseGuests), help: s.baseGuests ? 'Стоимость за базовое количество гостей' : s.inventory ? 'Стоимость за одного гостя' : '' });
-      if (s.baseGuests) {
-        if (draft.extraEnabled) html += field('extra', 'Количество доп. гостей', draft.extra, { input: true, min: 1, max: 10, help: 'Не более 10 дополнительных гостей' }) + field('extraPrice', 'Цена за 1 доп. гостя (RUB)', s.extraPrice, { read: true }) + field('extraTotal', 'Итого за доп. гостей (RUB)', Math.max(0, Number(draft.extra) || 0) * s.extraPrice, { read: true }) + secondary('Убрать доп. гостей', 'remove-extra');
-        else html += secondary('Добавить гостей', 'add-extra');
-      }
-      html += title('Детали начисления') + field('account', 'Счёт', draft.account ? '01 · «101» Комфорт' : '', { help: 'Иванов Иван Иванович' }) + field('comment', 'Комментарий', draft.comment, { input: true, textarea: true, help: 'Комментарий к услуге, до 500 символов' });
-    } else html += `<p class="helper ${scheduled ? 'availability-error' : ''}">${scheduled ? 'На выбранный интервал нет свободных ресурсов. Выберите другое время.' : 'После выбора свободного времени появятся доступные ресурсы и параметры услуги.'}</p>`;
-  } else html += '<p class="helper">Выберите группу и услугу, чтобы указать дату и время.</p>';
-  content.innerHTML = `<form id="service-form" class="form-body" novalidate>${html}<button type="button" class="secondary" data-action="cancel-form">Отменить</button></form>`;
+function openPicker(key){
+ if(busy)return;if(page==='form')formScroll=content.scrollTop;
+ const a=availability(draft,reservations());if(['staff','place','inventory'].includes(key)&&a[key==='place'?'places':key].length<=1)return;
+ if(key==='date'){const selected=!dateReason(draft.service,draft.date,reservations())?draft.date:stayDates().find(d=>!dateReason(draft.service,d,reservations()))||'';picker={key,name:'Дата оказания услуги',selected};}
+ else picker=pickerOptions(key);setPage('picker');
 }
-function renderList() {
-  appHeader('Услуги в номере', 'booking');
-  content.innerHTML = `${savedBanner ? `<div class="saved-banner">${icon('check')}Изменения применены к бронированию</div>` : ''}<div class="booking-info"><h3>«101» Комфорт</h3><p>Бронь № 4136985 · Иванов Иван Иванович</p><p>26–28 марта 2026 · 2 гостя</p></div><div class="service-list"><div class="list-title"><h3>Дополнительные услуги</h3><span>${items.length} шт.</span></div>${items.map(item => `<button class="service-card" data-detail="${esc(item.id)}"><span class="service-symbol">${icon(item.icon || 'clock')}</span><span class="service-info"><h4>${esc(item.title)}</h4><p>${esc(item.draft ? `${dateText(item.draft.date)} · ${item.draft.start}–${endTime(item.draft)}` : item.description)}</p>${item.draft ? `<p>${item.draft.guests}${SERVICES[item.draft.service].baseGuests && item.draft.extraEnabled ? ` + ${item.draft.extra}` : ''} гост. · ${esc(item.draft.place || item.draft.staff || item.draft.inventory.join(', '))}</p>` : ''}</span><span class="service-price">${money(item.price)}</span></button>`).join('')}<div class="list-add"><button class="text-button" data-action="choose-type">${icon('plus')}Добавить ещё услугу</button></div></div>`;
+function renderPicker(){appHeader(picker.name);if(picker.key==='date'){renderCalendar();return;}content.innerHTML=`<div class="picker-body ${picker.key==='start'?'compact':''}"><h3 class="picker-heading">${esc(picker.name)}</h3>${picker.options.map(o=>option(o,Array.isArray(picker.selected)?picker.selected.includes(o.value):picker.selected===o.value,picker.multiple)).join('')}${picker.help?`<p class="picker-help">${esc(picker.help)}</p>`:''}</div>`;}
+function renderCalendar(){const offset=6;content.innerHTML=`<div class="calendar"><h3>Ноябрь 2026</h3><div class="calendar-grid">${['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map(s=>`<span class="weekday">${s}</span>`).join('')}${'<span></span>'.repeat(offset)}${Array.from({length:30},(_,i)=>{const day=i+1,date='2026-11-'+String(day).padStart(2,'0'),reason=dateReason(draft.service,date,reservations());return `<button class="day ${reason?reason==='Нет свободных слотов'?'busy':'unavailable':'free'} ${date===picker.selected?'selected':''}" data-date="${date}" aria-label="${day} ноября 2026${reason?' — '+reason:''}" aria-pressed="${date===picker.selected}" ${reason?'disabled':''}>${day}</button>`;}).join('')}</div><p class="calendar-help">Проживание: 23–29 ноября включительно.\n23 ноября — прошлая дата. На 24–26 ноября продажи закрыты. 28 ноября нет свободных слотов.\nВ день выезда 29 ноября можно выбрать время после 12:00.</p></div>`;}
+function chooseOption(value){
+ if(page==='type'){if(value==='hourly')openForm();else setPage('general');return;}
+ if(page!=='picker')return;const o=picker.options.find(o=>o.value===value);if(!o||o.disabled)return;
+ if(picker.multiple){picker.selected=picker.selected.includes(value)?picker.selected.filter(v=>v!==value):[...picker.selected,value];render();return;}
+ const key=picker.key;let v=value;if(['extension','quantity','extra'].includes(key))v=Number(value);if(key==='inventory')v=[value];draft=updateDraft(draft,key,v,reservations());conflictMessage=editConflict?'Услуга изменена или удалена в другом окне. Откройте её заново.':'';
+ if(key==='group'){picker=pickerOptions('service');render();return;}
+ if(key==='staff'&&!draft.place&&SERVICES[draft.service].place&&availability(draft,reservations()).places.length>1){picker=pickerOptions('place');render();return;}
+ setPage('form',['service','group'].includes(key)?0:formScroll);
 }
-function renderDetail() {
-  const item = items.find(i => i.id === detailId); if (!item) { view = 'list'; render(); return; }
-  appHeader('Детали услуги', 'list'); const d = item.draft, s = d ? SERVICES[d.service] : null;
-  const pair = (a, b) => `<div class="detail-pair"><span>${esc(a)}</span><strong>${esc(b)}</strong></div>`;
-  content.innerHTML = `<div class="detail-body"><div class="detail-head"><h3>${esc(item.title)}</h3><p>${esc(d ? `${dateText(d.date)} · ${d.start}–${endTime(d)}` : item.description)}</p></div>${d ? `${pair('Темп начисления', 'За использование')}${pair('Длительность', `${s.duration + (s.extend ? d.extension : 0)} минут`)}${d.staff ? pair('Сотрудник', d.staff) : ''}${d.place ? pair('Место', d.place) : ''}${d.inventory.length ? pair('Инвентарь', d.inventory.join('\n')) : ''}${d.age ? pair('Возраст', d.age === 'adult' ? 'Взрослый' : 'Ребёнок (2–10 лет)') : ''}${pair('Количество гостей', `${d.guests}${s.baseGuests && d.extraEnabled ? ` + ${d.extra} доп.` : ''}`)}${pair('Цена', money(d.price))}${d.extension ? pair('Продление', `+${d.extension} мин · ${money(d.extension / 15 * 500)}`) : ''}${s.baseGuests && d.extraEnabled ? pair('Дополнительные гости', `${d.extra} × ${money(s.extraPrice)}`) : ''}${pair('Счёт', '01 · «101» Комфорт')}${d.comment ? pair('Комментарий', d.comment) : ''}${secondary('Изменить услугу', 'edit')}` : ''}<button class="danger-button" data-action="delete">${icon('trash')}Удалить услугу</button></div>`;
+function renderBooking(){appHeader('Детали бронирования');content.innerHTML=`<div class="detail-body"><h3>Иванов Иван Иванович</h3><p class="booking-meta">Бронь № 4136985\n«101» Комфорт · 2 гостя\n23–29 ноября 2026 · выезд в 12:00</p><button class="service-row" data-action="modify"><span>Модификация брони</span></button><button class="service-row" data-action="list"><span>Услуги в номере<small>${state.items.length} услуги · ${money(state.items.reduce((n,i)=>n+i.price,0))}</small></span></button></div>`;}
+function renderModify(){appHeader('Модификация брони');content.innerHTML=`<div class="detail-body"><p class="booking-meta">«101» Комфорт · 23–29 ноября 2026</p><button class="service-row" data-action="list">Услуги в номере</button></div>`;}
+function renderGeneral(){appHeader('Общие услуги и питание');content.innerHTML=`<div class="picker-body"><h3 class="picker-heading">Услуги в номере</h3>${state.items.filter(i=>!i.draft).map(i=>`<button class="service-row" data-detail="${i.id}"><span class="service-main">${esc(i.title)}</span><span class="service-price">${money(i.price)}</span></button>`).join('')}</div>`;}
+function renderDetail(){const i=state.items.find(i=>i.id===detailId);if(!i){setPage('list');return;}appHeader('Детали услуги');const d=i.draft;const pair=(a,b)=>`<div class="detail-pair"><span>${esc(a)}</span><strong>${esc(b)}</strong></div>`;content.innerHTML=`<div class="detail-body"><h3>${esc(i.title)}</h3>${d?`${pair('Дата',dateText(d.date))}${pair('Время',d.start+'–'+endTime(d))}${pair('Длительность',duration(d)+' минут')}${d.staff?pair('Сотрудник',d.staff):''}${d.place?pair('Место',d.place):''}${d.inventory.length?pair('Инвентарь',d.inventory.join(', ')):''}${d.age?pair('Возраст',d.age==='child'?'Ребёнок (2–10 лет)':'Взрослый'):''}${pair('Количество',d.quantity)}${pair('Цена',money(basePrice(d)))}${pair('Счёт',i.account)}${d.comment?pair('Комментарий',d.comment):''}${primary('Изменить услугу','edit')}`:''}${pair('Стоимость',money(i.price))}<button class="danger-button" data-action="delete">Удалить услугу</button></div>`;}
+function renderFooter(){
+ let html='',price=total(draft,reservations());
+ const sum=state.items.reduce((n,i)=>n+i.price,0),costRow=n=>`<div class="total-row"><span>${page==='list'&&savedResult?'Сумма за услуги':'Стоимость'}</span><strong>${money(n)}</strong></div>`;
+ if(page==='form')html=costRow(price)+primary(busy?'Добавляем…':editingId?'Сохранить изменения':'Добавить услугу','submit',busy||Object.keys(getErrors()).length>0);
+ else if(page==='list')html=costRow(sum)+primary(savedResult?'Готово':'Применить',savedResult?'booking':'apply');
+ else if(page==='picker'){
+  if(picker.key==='date')html=primary(picker.selected?'Выбрать '+dateText(picker.selected).replace(' 2026',''):'Нет свободных дат','confirm-date',!picker.selected);
+  else if(picker.multiple)html=costRow(price)+primary('Выбрать '+(picker.selected.length||'инвентарь'),'confirm-inventory',!picker.selected.length);
+  else html=(!['group','service','age'].includes(picker.key)&&draft.start?costRow(price):'')+primary('Отменить','cancel-picker');
+ }else if(page==='type'||page==='general')html=primary('Отменить','list');
+ else if(page==='detail'){const i=state.items.find(i=>i.id===detailId);html=costRow(i?.price||0)+primary('Готово','list');}
+ else html=primary('Услуги в номере','list');footer.innerHTML=html;
 }
-function renderBooking() {
-  appHeader('Детали бронирования', 'list');
-  content.innerHTML = `<div class="detail-body"><div class="detail-head"><h3>Иванов Иван Иванович</h3><p>Бронь № 4136985</p></div><div class="detail-notice">«101» Комфорт · 26–28 марта 2026<br>2 гостя · 2 ночи</div><h3 class="section-title">Услуги</h3><button class="service-card" data-action="list"><span class="service-symbol">${icon('service')}</span><span class="service-info"><h4>Услуги в номере</h4><p>${items.length} шт. · ${money(bookingTotal())}</p></span>${icon('next')}</button>${dirty() ? '<p class="helper">В списке услуг есть неприменённые изменения.</p>' : ''}</div>`;
+function renderProgress(){const labels=['Услуги в бронировании','Тип и выбор услуги','Дата и время','Ресурсы и параметры','Счёт и комментарий','Услуга добавлена'];let active=page==='list'?savedResult?5:0:page==='type'?1:!draft.service?1:!draft.start?2:Object.keys(getErrors()).some(k=>['staff','place','inventory','age'].includes(k))?3:4;$('#progress').innerHTML=labels.map((l,i)=>`<li class="${i===active?'active':i<active?'done':''}">${l}</li>`).join('');}
+function render(){if(page==='form')renderForm();else if(page==='picker')renderPicker();else if(page==='type')renderType();else if(page==='detail')renderDetail();else if(page==='booking')renderBooking();else if(page==='modify')renderModify();else if(page==='general')renderGeneral();else renderList();renderFooter();renderProgress();}
+function openForm(service=''){draft=newDraft();draft.account=defaultAccount(state.accounts);if(service)draft=updateDraft(draft,'service',service);editingId=null;editingSnapshot='';editConflict=false;requestId=crypto.randomUUID();conflictMessage='';formScroll=0;setPage('form');}
+function back(){if(busy)return;if(page==='picker'){setPage('form',formScroll);picker=null;}else if(page==='form'){editingId=null;conflictMessage='';setPage('list');}else if(page==='type'||page==='detail'||page==='general')setPage('list');else if(page==='modify')setPage('booking');else if(page==='booking')setPage('list');else setPage('booking');}
+async function submit(){
+ if(busy||Object.keys(getErrors()).length)return;formScroll=content.scrollTop;busy=true;renderFooter();header.querySelector('button').disabled=true;
+ await new Promise(resolve=>setTimeout(resolve,350));let latest=readState();if(latest.version<state.version)latest=structuredClone(state);
+ if(simulateConflict){latest.external.push({draft:structuredClone(draft)});simulateConflict=false;}
+ const result=commitService(latest,draft,requestId,editingId?{id:editingId,expected:editingSnapshot}:null);busy=false;
+ if(!result.ok){state=latest;saveState();editConflict=Boolean(result.errors.edit);if(!editConflict)draft=reconcileResources(draft,reservations());conflictMessage=result.errors.edit||'Доступность изменилась. Доступные ресурсы обновлены. Проверьте параметры и повторите добавление или выберите другое время.';setPage('form',formScroll);notify(editConflict?'Откройте актуальную услугу из списка':'Услуга не добавлена: проверьте доступность');return;}
+ state=result.state;const persisted=saveState();editingId=null;savedResult=true;setPage('list');notify(persisted?'Услуга добавлена в бронирование':'Услуга добавлена в текущем сеансе');
 }
-function render(keepScroll = false) {
-  const top = content.scrollTop;
-  if (view === 'form') renderForm(); else if (view === 'detail') renderDetail(); else if (view === 'booking') renderBooking(); else renderList();
-  renderFooter(); content.scrollTop = keepScroll ? top : 0; renderScenarios();
+function confirmAction(title,text,label,callback){const dialog=$('#confirm');dialog.innerHTML=`<h3 id="confirm-title">${esc(title)}</h3><p>${esc(text)}</p><div class="confirm-actions"><button data-confirm="cancel">Отменить</button><button data-confirm="yes">${esc(label)}</button></div>`;dialog.onclick=e=>{const b=e.target.closest('[data-confirm]');if(!b)return;dialog.close();if(b.dataset.confirm==='yes')callback();};dialog.showModal();}
+function demo(kind){
+ if(kind==='main'){editingId=null;setPage('list');return;}
+ if(kind==='conflict'){simulateConflict=true;notify('При следующем добавлении будет проверен конфликт доступности');return;}
+ openForm('steam');draft=updateDraft(draft,'date',kind==='departure'?'2026-11-29':'2026-11-27',reservations());draft=updateDraft(draft,'start',kind==='departure'?'17:00':'11:00',reservations());draft={...draft,staff:'Петров В.И.',place:'Парная №2',inventory:['Веник'],age:'child'};render();
 }
-function change(key, value) {
-  const before = [draft.staff, draft.place, ...draft.inventory].filter(Boolean).join('|');
-  draft = updateDraft(draft, key, value, reservations()); delete errors[key];
-  if (Object.keys(errors).length) errors = validate(draft, reservations());
-  render(true);
-  if (key === 'extension' && before && before !== [draft.staff, draft.place, ...draft.inventory].filter(Boolean).join('|')) notify('Доступные ресурсы обновлены для нового интервала');
+async function run(action){
+ if(action==='back')return back();if(busy)return;
+ if(action==='add'){savedResult=false;setPage('type');}
+ if(action==='list')setPage('list');if(action==='booking')setPage('booking');if(action==='modify')setPage('modify');
+ if(action==='home'){editingId=null;setPage('list');}
+ if(action==='cancel-picker'){setPage('form',formScroll);picker=null;}
+ if(action==='confirm-date'){if(!picker.selected||dateReason(draft.service,picker.selected,reservations()))return;draft=updateDraft(draft,'date',picker.selected,reservations());conflictMessage=editConflict?'Услуга изменена или удалена в другом окне. Откройте её заново.':'';setPage('form',formScroll);picker=null;}
+ if(action==='confirm-inventory'){if(!picker.selected.length)return;draft=updateDraft(draft,'inventory',[...picker.selected],reservations());setPage('form',formScroll);picker=null;}
+ if(action==='submit')await submit();
+ if(action==='apply'){saveState();notify('Изменения применены к бронированию');}
+ if(action==='edit'){const i=state.items.find(i=>i.id===detailId);if(!i?.draft)return;draft=structuredClone(i.draft);editingId=i.id;editingSnapshot=JSON.stringify(i);editConflict=false;requestId=crypto.randomUUID();formScroll=0;conflictMessage='';setPage('form');}
+ if(action==='delete')confirmAction('Удалить услугу?','Услуга будет удалена из демонстрационного бронирования.','Удалить',()=>{state.items=state.items.filter(i=>i.id!==detailId);state.version++;saveState();setPage('list');notify('Услуга удалена');});
+ if(action==='reset')confirmAction('Начать заново?','Добавленные услуги и счета будут сброшены. Останутся завтрак и парковка.','Сбросить',()=>{state=initialState();saveState();draft=newDraft();editingId=null;simulateConflict=false;savedResult=false;setPage('list');});
 }
-
-function positionSheet() {
-  const r = $('#phone').getBoundingClientRect();
-  Object.assign(dialog.style, { left: `${r.left}px`, bottom: `${Math.max(0, innerHeight - r.bottom + 32)}px`, width: `${r.width}px`, maxWidth: `${r.width}px`, maxHeight: `${Math.min(690, r.height - 96)}px` });
-}
-function showSheet() {
-  const m = modal; if (!m) return;
-  let body = '', controls = '';
-  if (m.kind === 'calendar') {
-    const year = m.month.getFullYear(), month = m.month.getMonth(), count = new Date(year, month + 1, 0).getDate(), offset = (new Date(year, month, 1).getDay() + 6) % 7;
-    const monthKey = `${year}-${String(month + 1).padStart(2, '0')}`;
-    body = `<div class="calendar"><div class="month-nav"><button class="icon-button" aria-label="Предыдущий месяц" data-month="-1" ${monthKey <= STAY.arrival.slice(0, 7) ? 'disabled' : ''}>${icon('left')}</button><strong>${m.month.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' }).replace(' г.', '')}</strong><button class="icon-button" aria-label="Следующий месяц" data-month="1" ${monthKey >= STAY.departure.slice(0, 7) ? 'disabled' : ''}>${icon('right')}</button></div><div class="calendar-grid">${['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map(d => `<span class="weekday">${d}</span>`).join('')}${'<span></span>'.repeat(offset)}${Array.from({ length: count }, (_, i) => {
-      const date = `${year}-${String(month + 1).padStart(2, '0')}-${String(i + 1).padStart(2, '0')}`, inStay = isStayDate(date), free = isAvailableDate(draft.service, date, reservations());
-      const reason = !inStay ? 'вне дат проживания' : !free ? 'нет свободных слотов' : date === STAY.departure ? 'день выезда, доступен весь день' : 'есть свободное время';
-      return `<button class="day ${!inStay ? 'outside' : !free ? 'busy' : 'free'} ${m.selected === date ? 'selected' : ''}" data-date="${date}" aria-label="${dateText(date)} — ${reason}" aria-pressed="${m.selected === date}" ${!free ? 'disabled' : ''}>${i + 1}</button>`;
-    }).join('')}</div><div class="calendar-legend"><span>Серые — вне проживания</span><span>Зачёркнутые — всё занято</span></div><p class="calendar-caption">Проживание: 26–28 марта включительно.<br>28 марта — день выезда. Можно выбрать время и после 12:00.</p></div>`;
-    controls = primary(m.selected ? `Выбрать ${dateText(m.selected)}` : 'Нет свободных дат', 'confirm-date', !isAvailableDate(draft.service, m.selected, reservations()));
-  } else if (m.kind === 'confirm') { body = `<p class="confirm-body">${esc(m.text)}</p>`; controls = `<div class="button-row">${secondary('Отменить', 'close-sheet')}${primary(m.label, 'confirm-action')}</div>`; }
-  else {
-    body = m.options.map(o => { const selected = Array.isArray(m.selected) ? m.selected.includes(o.value) : m.selected === o.value; return `<button class="option ${selected ? 'selected' : ''}" data-option="${esc(o.value)}" ${o.disabled ? 'disabled' : ''} aria-pressed="${selected}"><span class="option-main">${esc(o.label)}${o.description ? `<small>${esc(o.description)}</small>` : ''}</span>${o.side ? `<span class="option-side">${esc(o.side)}</span>` : ''}<span class="radio ${m.multiple ? 'check' : ''}" aria-hidden="true"></span></button>`; }).join('');
-    if (m.help) body += `<p class="sheet-help">${esc(m.help)}</p>`;
-    if (m.kind === 'type') controls = primary('Добавить', 'confirm-type', m.selected !== 'hourly');
-    else if (m.multiple) controls = primary(m.selected.length ? `Выбрать ${m.selected.length}` : 'Выбрать инвентарь', 'confirm-inventory', !m.selected.length);
-    else controls = secondary('Отменить', 'close-sheet');
-  }
-  dialog.innerHTML = `<div class="sheet-handle"></div><div class="sheet-head"><h3 id="sheet-title">${esc(m.title)}</h3><button class="icon-button" aria-label="Закрыть" data-action="close-sheet">${icon('close')}</button></div><div class="sheet-body">${body}</div><div class="sheet-footer">${controls}</div>`;
-  positionSheet(); if (!dialog.open) dialog.showModal();
-}
-function closeSheet() { dialog.close(); modal = null; }
-function pick(key) {
-  const s = SERVICES[draft.service], a = availability(draft, reservations()); let options = [], selected = draft[key], name = '';
-  if (['staff', 'place', 'inventory'].includes(key) && (!isSlotAvailable(draft, reservations()) || a[key === 'place' ? 'places' : key].length <= 1)) return;
-  if (key === 'date') { const selected = isAvailableDate(draft.service, draft.date, reservations()) ? draft.date : stayDates().find(date => isAvailableDate(draft.service, date, reservations())) || ''; modal = { kind: 'calendar', title: 'Дата оказания услуги', selected, month: new Date((selected || STAY.arrival).slice(0, 7) + '-01T12:00:00') }; showSheet(); return; }
-  if (key === 'group') { name = 'Группа услуг'; options = ['Бани', 'Бассейн', 'Аренда'].map(value => ({ value, label: value })); }
-  if (key === 'service') { name = 'Услуга'; options = Object.entries(SERVICES).filter(([, s]) => s.group === draft.group).map(([value, s]) => ({ value, label: s.title, description: `${s.duration} минут${s.extend ? ' · доступно продление' : ''}` })); }
-  if (key === 'start') { name = 'Начало оказания'; options = STARTS.map(value => {
-    const slot = { ...draft, start: value, extension: 0 }, free = isSlotAvailable(slot, reservations()), resources = availability(slot, reservations());
-    const counts = [s.staff ? `Сотрудников: ${resources.staff.length}` : '', s.place ? `Мест: ${resources.places.length}` : '', s.inventory ? `Инвентаря: ${resources.inventory.length}` : ''].filter(Boolean).join(' · ');
-    return { value, label: value, disabled: !free, description: free ? counts : 'Нет свободных ресурсов на весь интервал' };
-  }); }
-  if (key === 'extension') { name = 'Окончание и продление'; options = [0, 15, 30].map(n => ({ value: String(n), label: endTime({ ...draft, extension: n }), disabled: !isSlotAvailable({ ...draft, extension: n }, reservations()), description: isSlotAvailable({ ...draft, extension: n }, reservations()) ? '' : 'Нет свободных ресурсов на весь интервал', side: n ? `+${money(n / 15 * 500)}` : 'Без доплаты' })); selected = String(draft.extension); }
-  if (key === 'staff') { name = 'Сотрудник'; options = a.staff.map(value => ({ value, label: value })); }
-  if (key === 'place') { name = 'Место'; options = a.places.map(value => ({ value, label: value })); }
-  if (key === 'inventory') { name = 'Инвентарь'; options = a.inventory.map(value => ({ value, label: value })); }
-  if (key === 'age') { name = 'Возраст гостя'; options = [{ value: 'adult', label: 'Взрослый', side: money(1500) }, { value: 'child', label: 'Ребёнок (2–10 лет)', side: money(750) }]; }
-  if (key === 'account') { name = 'Счёт'; options = [{ value: '01', label: '01 · «101» Комфорт', description: 'Иванов Иван Иванович' }]; }
-  modal = { kind: 'options', title: name, key, options, selected: Array.isArray(selected) ? [...selected] : selected, multiple: key === 'inventory', help: key === 'inventory' ? 'Выберите одну или несколько единиц инвентаря' : '' }; showSheet();
-}
-function chooseType() { modal = { kind: 'type', title: 'Выбор типа услуги', selected: '', options: [{ value: 'general', label: 'Общая услуга и питание', description: 'Услуги без привязки ко времени', disabled: true }, { value: 'hourly', label: 'Почасовая услуга', description: 'Баня, массаж, прокат и другие услуги с фиксированной длительностью' }] }; showSheet(); }
-function openForm(service = null) { draft = service ? updateDraft(newDraft(), 'service', service) : newDraft(); errors = {}; editingId = null; view = 'form'; savedBanner = false; render(); }
-function submit() {
-  errors = validate(draft, reservations());
-  if (Object.keys(errors).length) { render(true); requestAnimationFrame(() => { const el = content.querySelector('.field-error'); el?.scrollIntoView({ block: 'center', behavior: 'smooth' }); el?.querySelector('button,input')?.focus({ preventScroll: true }); }); notify('Заполните обязательные поля'); return; }
-  const item = { id: editingId || crypto.randomUUID(), title: SERVICES[draft.service].title, draft: structuredClone(draft), price: total(draft, reservations()), icon: 'clock' };
-  if (editingId) items = items.map(i => i.id === editingId ? item : i); else items.push(item);
-  const edited = Boolean(editingId); view = 'list'; editingId = null; savedBanner = false; render(); notify(edited ? 'Изменения услуги сохранены' : 'Услуга добавлена');
-}
-function confirmAction(title, text, label, run) { modal = { kind: 'confirm', title, text, label, run }; showSheet(); }
-function run(action) {
-  if (action === 'close-sheet') return closeSheet();
-  if (action === 'confirm-date') { const val = modal.selected; if (!isAvailableDate(draft.service, val, reservations())) return; closeSheet(); return change('date', val); }
-  if (action === 'confirm-type') { closeSheet(); return openForm(); }
-  if (action === 'confirm-inventory') { const val = [...modal.selected]; closeSheet(); return change('inventory', val); }
-  if (action === 'confirm-action') { const fn = modal.run; closeSheet(); return fn(); }
-  if (action === 'choose-type') return chooseType();
-  if (action === 'submit') return submit();
-  if (action === 'cancel-form') { const edited = Boolean(editingId); view = edited ? 'detail' : 'list'; errors = {}; editingId = null; render(); return; }
-  if (action === 'list' || action === 'back') { view = 'list'; return render(); }
-  if (action === 'booking') { view = 'booking'; return render(); }
-  if (action === 'add-extra' || action === 'remove-extra') return change('extraEnabled', action === 'add-extra');
-  if (action === 'apply') { if (items.some(item => item.draft && Object.keys(validate(item.draft, items.filter(other => other.id !== item.id))).length)) return notify('Проверьте даты, время и ресурсы добавленных услуг'); saved = structuredClone(items); let durable = true; try { localStorage.setItem(storageKey, JSON.stringify(saved)); } catch { durable = false; } savedBanner = true; render(true); return notify(durable ? 'Изменения применены к бронированию' : 'Применено в текущем сеансе; хранилище браузера недоступно'); }
-  if (action === 'edit') { const item = items.find(i => i.id === detailId); draft = structuredClone(item.draft); editingId = item.id; errors = {}; view = 'form'; return render(); }
-  if (action === 'delete') return confirmAction('Удалить услугу?', 'Услуга будет удалена из списка. Чтобы сохранить изменения в бронировании, нажмите «Применить».', 'Удалить', () => { items = items.filter(i => i.id !== detailId); view = 'list'; savedBanner = false; render(); notify('Услуга удалена'); });
-}
-document.addEventListener('click', event => {
-  const b = event.target.closest('button'); if (!b || b.disabled) return;
-  if (b.dataset.action) return run(b.dataset.action);
-  if (b.dataset.picker) return pick(b.dataset.picker);
-  if (b.dataset.detail) { detailId = b.dataset.detail; view = 'detail'; return render(); }
-  if (b.dataset.scenario) { const selected = b.dataset.scenario; const launch = () => { scenario = selected; openForm(selected); draft = updateDraft(draft, 'date', '2026-03-26', reservations()); draft = updateDraft(draft, 'start', '11:00', reservations()); render(); }; if (view === 'form' && (draft.service || draft.group)) return confirmAction('Сменить демонстрационный кейс?', 'Текущая незавершённая форма будет заменена выбранным кейсом. Добавленные услуги останутся в списке.', 'Перейти', launch); return launch(); }
-  if (b.hasAttribute('data-option')) {
-    const val = b.dataset.option;
-    if (modal.multiple) { modal.selected = modal.selected.includes(val) ? modal.selected.filter(v => v !== val) : [...modal.selected, val]; showSheet(); }
-    else if (modal.kind === 'type') { modal.selected = val; showSheet(); }
-    else { const key = modal.key; closeSheet(); change(key, key === 'extension' ? Number(val) : val); }
-  }
-  if (b.dataset.date && isAvailableDate(draft.service, b.dataset.date, reservations())) { modal.selected = b.dataset.date; showSheet(); }
-  if (b.dataset.month) { modal.month.setMonth(modal.month.getMonth() + Number(b.dataset.month)); showSheet(); }
-});
-content.addEventListener('input', event => {
-  const key = event.target.dataset.input; if (!key) return;
-  const value = key === 'comment' ? event.target.value : event.target.value === '' ? '' : Number(event.target.value);
-  draft = updateDraft(draft, key, value, reservations()); delete errors[key]; renderFooter();
-  const w = event.target.closest('.field-wrap'); w?.classList.remove('field-error');
-  if (key === 'extra') { const el = content.querySelector('[data-field="extraTotal"] .field-value'); if (el) el.textContent = String(Math.max(0, Number(draft.extra) || 0) * SERVICES[draft.service].extraPrice); }
-});
-content.addEventListener('submit', event => { event.preventDefault(); if (view === 'form') submit(); });
-dialog.addEventListener('cancel', () => { modal = null; });
-dialog.addEventListener('click', event => { if (event.target !== dialog) return; const r = dialog.getBoundingClientRect(); if (event.clientY < r.top || event.clientY > r.bottom || event.clientX < r.left || event.clientX > r.right) closeSheet(); });
-window.addEventListener('resize', () => { if (dialog.open) positionSheet(); });
-$('#reset-demo').addEventListener('click', () => confirmAction('Начать заново?', 'Демонстрационные изменения будут сброшены. В списке останутся завтрак и парковка.', 'Начать заново', () => { saved = initial(); items = structuredClone(saved); try { localStorage.removeItem(storageKey); } catch {} scenario = 'steam'; draft = newDraft(); errors = {}; editingId = null; view = 'list'; savedBanner = false; render(); notify('Можно пройти сценарий заново'); }));
+document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b||b.disabled||busy)return;if(b.dataset.action)return void run(b.dataset.action);if(b.dataset.picker)return openPicker(b.dataset.picker);if(b.dataset.demo)return demo(b.dataset.demo);if(b.dataset.detail){detailId=b.dataset.detail;setPage('detail');return;}if(b.hasAttribute('data-option'))return chooseOption(b.dataset.option);if(b.dataset.date&&!dateReason(draft.service,b.dataset.date,reservations())){picker.selected=b.dataset.date;render();}});
+content.addEventListener('input',e=>{if(e.target.id!=='comment')return;draft=updateDraft(draft,'comment',e.target.value,reservations());if(e.target.value!==draft.comment)e.target.value=draft.comment;$('#comment-count').textContent=`Необязательно · ${draft.comment.length} / 255 символов`;e.target.style.height='auto';e.target.style.height=Math.max(48,e.target.scrollHeight)+'px';renderFooter();});
+content.addEventListener('submit',e=>{e.preventDefault();if(page==='form')void submit();});
+window.addEventListener('storage',e=>{if(e.key!==storageKey||busy)return;state=readState();if(page==='form'||page==='picker'){const original=editingId?state.items.find(i=>i.id===editingId):null;editConflict=Boolean(editingId&&(!original||JSON.stringify(original)!==editingSnapshot));if(!editConflict)draft=reconcileResources(draft,reservations());conflictMessage=editConflict?'Услуга изменена или удалена в другом окне. Откройте её заново.':'Бронирование обновлено в другом окне. Проверьте параметры.';if(page==='picker'&&picker.key!=='date')picker=pickerOptions(picker.key);}const scroll=content.scrollTop;render();content.scrollTop=scroll;});
 render();
-if (restoredWarning) notify('Ранее сохранённые услуги с недоступными датами или ресурсами исключены из демонстрации');

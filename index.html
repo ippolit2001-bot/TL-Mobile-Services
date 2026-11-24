@@ -1,3 +1,25 @@
 <!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#153e99"><meta name="description" content="Кликабельный прототип добавления почасовых услуг в мобильном приложении TL."><title>Почасовые услуги · TL Mobile</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23153e99'/%3E%3Cpath d='M8 9h16v4h-6v12h-4V13H8' fill='white'/%3E%3C/svg%3E"><link rel="stylesheet" href="styles.css"></head>
-<body><main class="workspace"><aside class="guide"><a class="brand" href="./" aria-label="TL Mobile — начало"><span>tl</span> MOBILE <i>Прототип</i></a><div class="guide-main"><p class="eyebrow">УСЛУГИ В БРОНИРОВАНИИ</p><h1>Почасовая услуга.<br>От выбора<br>до бронирования.</h1><p class="intro">Интерактивная версия мобильного сценария. Добавьте услугу, выберите время и доступные ресурсы — стоимость пересчитается автоматически.</p><div class="route"><span>Выбрать услугу</span><b>·</b><span>Настроить</span><b>·</b><span>Добавить</span></div><p class="scenario-label">ПРОВЕРИТЬ ДРУГОЙ КЕЙС</p><div id="scenarios" class="scenarios"></div><div class="case-note" id="case-note"></div></div><div class="guide-bottom"><button class="reset" id="reset-demo">Начать заново</button><a href="https://www.figma.com/design/iC8R8NAxEZILEpw0ZjUyUp/?node-id=500-55624" target="_blank" rel="noreferrer">Макеты в Figma</a><p>Демонстрационные данные · сохранение в этом браузере</p></div></aside><section class="device-area" aria-label="Мобильный прототип"><div class="device-meta"><span>TL MOBILE</span><span>360 × 800 · адаптивный экран</span></div><div class="phone" id="phone"><div class="statusbar" aria-hidden="true"><span>12:30</span><span class="status-icons">◢ ▰ <span class="battery"></span></span></div><header id="app-header" class="app-header"></header><div id="app-content" class="app-content" tabindex="-1"></div><footer id="app-footer" class="app-footer"></footer><div class="system-nav" aria-hidden="true"><span>◁</span><span>○</span><span>□</span></div><div id="toast" class="toast" role="status" aria-live="polite"></div><dialog id="picker" class="sheet" aria-labelledby="sheet-title"></dialog></div><p class="device-caption">Нажимайте на поля и кнопки, как в приложении</p></section></main><script type="module" src="app.js"></script></body></html>
+<html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#193e96"><title>TL Mobile · Почасовые услуги</title><link rel="stylesheet" href="styles.css"></head>
+<body>
+<main class="workspace">
+  <aside class="guide">
+    <a class="brand" href="./">TL <span>MOBILE</span></a>
+    <div class="guide-content"><p class="eyebrow">УСЛУГИ В БРОНИРОВАНИИ</p><h1>Добавление<br>почасовой услуги</h1><p class="intro">Кликабельный сценарий по актуальной секции Figma. Поля и выбранные параметры сохраняются при переходах.</p><ol id="progress" class="progress"></ol><div class="demo-tools"><p class="eyebrow">ПРОВЕРИТЬ СЦЕНАРИЙ</p><button data-demo="main">Пройти с начала</button><button data-demo="ready">Открыть заполненную форму</button><button data-demo="departure">Услуга после времени выезда</button><button data-demo="conflict">Проверить конфликт при добавлении</button></div><p class="demo-note">Демо-дата: 24 ноября 2026<br>Проживание: 23–29 ноября · выезд 12:00<br>27 ноября: свободно · 28 ноября: занято<br>Доступность демонстрационная, PMS не подключён.</p></div>
+    <div class="guide-bottom"><button data-action="reset">Сбросить демонстрацию</button><a href="https://www.figma.com/design/HJqHBF2aSgjUoYtrysofG4/TL-MOBILE?node-id=48181-77732" target="_blank" rel="noreferrer">Исходные макеты ↗</a><span id="storage-status">Изменения сохраняются в этом браузере</span></div>
+  </aside>
+  <section class="device-area" aria-label="Мобильное приложение TL">
+    <div class="device-meta"><span>TL MOBILE</span><span>Основной сценарий · интерактивный прототип</span></div>
+    <div class="phone" id="phone">
+      <div class="statusbar" aria-hidden="true"><img src="assets/status.svg" width="118" height="24" alt=""></div>
+      <header id="app-header" class="app-header"></header>
+      <div id="app-content" class="app-content" tabindex="-1"></div>
+      <footer id="app-footer" class="app-footer"></footer>
+      <nav class="system-nav" aria-label="Системная навигация"><button data-action="back" aria-label="Системная кнопка назад"><img src="assets/system-back.svg" width="15" height="17" alt=""></button><button data-action="home" aria-label="В начало"><img src="assets/home.svg" width="16" height="16" alt=""></button><span><img src="assets/recent.svg" width="16" height="16" alt=""></span></nav>
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    </div>
+  </section>
+</main>
+<dialog id="confirm" class="confirm-dialog" aria-labelledby="confirm-title"></dialog>
+<script type="module" src="app.js"></script>
+</body></html>
